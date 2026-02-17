@@ -1,0 +1,19 @@
+bundesland_key,metric,bundesland,value,yoy_pct
+bremen,cargo_1000_tons,Bremen,4672.384,3.0
+bremen,container_1000_teu,Bremen,432.0818,6.9
+bremen,passengers_count,Bremen,25431.0,25.9
+hamburg,cargo_1000_tons,Hamburg,8418.396,-3.6
+hamburg,container_1000_teu,Hamburg,696.4459,-3.0
+hamburg,passengers_count,Hamburg,114965.0,0.6
+mecklenburg-vorpommern,cargo_1000_tons,Mecklenburg-Vorpommern,2996.895,10.4
+mecklenburg-vorpommern,container_1000_teu,Mecklenburg-Vorpommern,0.217,13.0
+mecklenburg-vorpommern,passengers_count,Mecklenburg-Vorpommern,277133.0,-2.6
+niedersachsen,cargo_1000_tons,Niedersachsen,4680.5163,-7.7
+niedersachsen,container_1000_teu,Niedersachsen,114.0799,33.7
+niedersachsen,passengers_count,Niedersachsen,933287.0,-4.1
+schleswig-holstein,cargo_1000_tons,Schleswig-Holstein,3186.0029,-8.9
+schleswig-holstein,container_1000_teu,Schleswig-Holstein,9.4687,-9.7
+schleswig-holstein,passengers_count,Schleswig-Holstein,1067529.0,-8.6
+übrige regionen,cargo_1000_tons,Übrige Regionen,6.923,70.2
+übrige regionen,container_1000_teu,Übrige Regionen,0.387,182.5
+übrige regionen,passengers_count,Übrige Regionen,777.0,8.4
