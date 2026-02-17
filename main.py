@@ -7,6 +7,9 @@ import textwrap
 import re
 import unicodedata
 
+# -----------------------
+# CONFIG
+# -----------------------
 XLSX_PATH = "data/seeschifffahrt.xlsx"
 
 SHEET_CARGO_TONS = "46331-b06"
@@ -16,9 +19,15 @@ SHEET_PASSENGERS = "46331-b16"
 CURRENT_VALUE_COL = 1
 YOY_PCT_COL = 5
 
+# Set to False if you want to remove "Übrige Regionen" everywhere
+INCLUDE_UEBRIGE_REGIONEN = True
+
 Path("output").mkdir(exist_ok=True)
 
 
+# -----------------------
+# STYLE HELPERS
+# -----------------------
 def economist_style():
     plt.rcParams.update({
         "figure.facecolor": "white",
@@ -53,20 +62,26 @@ def fmt_big(x, pos):
     return f"{x:.0f}"
 
 
+# -----------------------
+# CANONICALIZATION (THE KEY FIX)
+# -----------------------
 def canonical_name(s) -> str:
     s = "" if pd.isna(s) else str(s)
-    s = s.replace("\u00a0", " ")
-    s = unicodedata.normalize("NFKC", s)
-    s = s.replace("–", "-").replace("—", "-")
+    s = s.replace("\u00a0", " ")               # NBSP
+    s = unicodedata.normalize("NFKC", s)       # unicode normalize
+    s = s.replace("–", "-").replace("—", "-")  # normalize dashes
     s = s.strip()
-    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"\s+", " ", s)                 # collapse whitespace
     return s
 
 
-def canonical_key(s) -> str:
+def bundesland_key(s) -> str:
     return canonical_name(s).lower()
 
 
+# -----------------------
+# READER
+# -----------------------
 def read_bundesland_table(sheet_name: str, metric_name: str) -> pd.DataFrame:
     df = pd.read_excel(XLSX_PATH, sheet_name=sheet_name, header=None)
 
@@ -86,6 +101,7 @@ def read_bundesland_table(sheet_name: str, metric_name: str) -> pd.DataFrame:
     df.columns = ["bundesland", "value", "yoy_pct"]
 
     df["bundesland"] = df["bundesland"].apply(canonical_name)
+    df["bundesland_key"] = df["bundesland"].apply(bundesland_key)
 
     df = df[~df["bundesland"].str.contains("Ende der Tabelle", case=False, na=False)]
     df = df[~df["bundesland"].str.contains("Insgesamt", case=False, na=False)]
@@ -99,6 +115,9 @@ def read_bundesland_table(sheet_name: str, metric_name: str) -> pd.DataFrame:
     return df
 
 
+# -----------------------
+# BUILD DATA LONG
+# -----------------------
 economist_style()
 
 cargo = read_bundesland_table(SHEET_CARGO_TONS, "cargo_1000_tons")
@@ -107,65 +126,88 @@ pax = read_bundesland_table(SHEET_PASSENGERS, "passengers_count")
 
 data_long = pd.concat([cargo, teu, pax], ignore_index=True)
 
-data_long["bundesland_raw"] = data_long["bundesland"]
-data_long["bundesland"] = data_long["bundesland"].apply(canonical_name)
-data_long["bundesland_key"] = data_long["bundesland"].apply(canonical_key)
+if not INCLUDE_UEBRIGE_REGIONEN:
+    data_long = data_long[~data_long["bundesland"].str.contains("Übrige Regionen", case=False, na=False)]
 
-# Collapse duplicates even if the visible label looks identical but raw differs
+# HARD DEDUP: one row per (bundesland_key, metric)
+# Keep a stable display label using "first" after canonicalization
 data_long = (
     data_long.groupby(["bundesland_key", "metric"], as_index=False)
              .agg(
                  bundesland=("bundesland", "first"),
                  value=("value", "mean"),
-                 yoy_pct=("yoy_pct", "mean")
+                 yoy_pct=("yoy_pct", "mean"),
              )
 )
 
-# Optional: remove "Übrige Regionen"
-# data_long = data_long[~data_long["bundesland"].str.contains("Übrige Regionen", case=False, na=False)]
+# Remove empty/invalid region names (safety)
+data_long = data_long[data_long["bundesland_key"].str.len() > 0].copy()
 
+# Save cleaned long data
 data_long.to_csv("output/bundesland_activity_long.csv", index=False)
 
-# Mix proxy + shares
+# -----------------------
+# MIX / SHARES (GROUP BY KEY)
+# -----------------------
 data_long["abs_value"] = data_long["value"].abs()
-data_long["total_activity_proxy"] = data_long.groupby("bundesland")["abs_value"].transform("sum")
+
+totals = (
+    data_long.groupby("bundesland_key", as_index=False)["abs_value"]
+             .sum()
+             .rename(columns={"abs_value": "total_activity_proxy"})
+)
+
+data_long = data_long.merge(totals, on="bundesland_key", how="left")
 data_long["share"] = data_long["abs_value"] / (data_long["total_activity_proxy"] + 1e-9)
 
+# HHI by key
 hhi = (
-    data_long.groupby("bundesland")["share"]
-    .apply(lambda s: float(np.sum(s ** 2)))
+    data_long.groupby("bundesland_key")["share"]
+    .apply(lambda s: float(np.sum(s**2)))
     .reset_index(name="hhi")
 )
 
-def top_shares(series: pd.Series) -> pd.Series:
-    s = series.sort_values(ascending=False).reset_index(drop=True)
+# top1/top2 share by key
+def top_shares(s: pd.Series) -> pd.Series:
+    s = s.sort_values(ascending=False).reset_index(drop=True)
     top1 = float(s.iloc[0]) if len(s) else np.nan
     top2 = float(s.iloc[:2].sum()) if len(s) >= 2 else float(s.sum())
     return pd.Series({"top1_share": top1, "top2_share": top2})
 
 tops = (
-    data_long.groupby("bundesland")["share"]
+    data_long.groupby("bundesland_key")["share"]
     .apply(top_shares)
     .reset_index()
 )
 
+# momentum by key
 momentum = (
-    data_long.groupby("bundesland")["yoy_pct"]
-    .mean()
-    .reset_index(name="avg_yoy_pct")
+    data_long.groupby("bundesland_key", as_index=False)["yoy_pct"]
+             .mean()
+             .rename(columns={"yoy_pct": "avg_yoy_pct"})
 )
 
-tot_activity = (
-    data_long.groupby("bundesland")["abs_value"]
-    .sum()
-    .reset_index(name="total_activity_proxy")
+# label table by key (stable display label)
+labels = (
+    data_long.groupby("bundesland_key", as_index=False)["bundesland"]
+             .first()
 )
 
+# total proxy by key
+tot_activity = totals.copy()
+
+# -----------------------
+# METRICS TABLE (MERGE BY KEY ONLY)
+# -----------------------
 metrics = (
-    hhi.merge(tops, on="bundesland")
-       .merge(momentum, on="bundesland", how="left")
-       .merge(tot_activity, on="bundesland", how="left")
+    labels.merge(hhi, on="bundesland_key", how="left")
+          .merge(tops, on="bundesland_key", how="left")
+          .merge(momentum, on="bundesland_key", how="left")
+          .merge(tot_activity, on="bundesland_key", how="left")
 )
+
+# Final safety: enforce uniqueness
+metrics = metrics.drop_duplicates(subset=["bundesland_key"]).copy()
 
 metrics["avg_yoy_pct"] = metrics["avg_yoy_pct"].fillna(0.0)
 metrics["diversification"] = 1 - metrics["hhi"]
@@ -181,32 +223,40 @@ metrics = metrics.sort_values("resilience_score", ascending=False)
 
 metrics.to_csv("output/bundesland_resilience_metrics.csv", index=False)
 
-# Rankings
+# -----------------------
+# PLOT DATA
+# -----------------------
 N = min(10, len(metrics))
 top_res = metrics.head(N).sort_values("resilience_score", ascending=True)
 top_dep = metrics.sort_values("hhi", ascending=False).head(N).sort_values("hhi", ascending=True)
 
-# Mix pivot
+# Mix pivot by KEY (prevents duplicate index)
 mix = data_long.copy()
 mix["share_pct"] = 100 * mix["share"]
 
 pivot = (
-    mix.pivot_table(index="bundesland", columns="metric", values="share_pct", aggfunc="sum")
+    mix.pivot_table(index="bundesland_key", columns="metric", values="share_pct", aggfunc="sum")
        .fillna(0)
 )
-pivot = pivot.groupby(pivot.index).sum()
 
+# choose TopK by resilience (using keys)
 topK = min(8, len(metrics))
-top_names = metrics.head(topK)["bundesland"].tolist()
-pivot = pivot.loc[[n for n in top_names if n in pivot.index]]
+top_keys = metrics.head(topK)["bundesland_key"].tolist()
+pivot = pivot.loc[[k for k in top_keys if k in pivot.index]]
 
-# Figure
+# map keys -> display label for y-axis
+key_to_name = dict(zip(metrics["bundesland_key"], metrics["bundesland"]))
+pivot_names = [key_to_name.get(k, k) for k in pivot.index]
+
+# -----------------------
+# FIGURE LAYOUT
+# -----------------------
 fig = plt.figure(figsize=(12.5, 15), dpi=240)
 fig.subplots_adjust(left=0.20, right=0.97, top=0.90, bottom=0.06, hspace=0.55, wspace=0.35)
 gs = fig.add_gridspec(3, 2, height_ratios=[1.05, 1.55, 1.25])
 
-fig.text(0.20, 0.965, "German seaport regions: resilience vs concentration", ha="left", va="top",
-         fontsize=18, fontweight="bold")
+fig.text(0.20, 0.965, "German seaport regions: resilience vs concentration",
+         ha="left", va="top", fontsize=18, fontweight="bold")
 fig.text(0.20, 0.942, "Mix index across cargo, containers and passengers • Source: Destatis",
          ha="left", va="top", fontsize=11, color="#444444")
 
@@ -226,8 +276,9 @@ ax2.set_xlabel("HHI (higher = more dependent)")
 ax2.grid(axis="x")
 ax2.grid(axis="y", visible=False)
 
-# Panel 3 scatter + ALL labels
+# Panel 3 scatter (LABELS ONCE — because metrics is unique by key)
 ax3 = fig.add_subplot(gs[1, :])
+
 x = metrics["hhi"].astype(float)
 y = metrics["total_activity_proxy"].astype(float)
 
@@ -252,6 +303,7 @@ ax3.text(0.80, 0.92, "High conc.\nLarge", transform=ax3.transAxes, fontsize=10, 
 ax3.text(0.02, 0.08, "Low conc.\nSmall", transform=ax3.transAxes, fontsize=10, color="#333333")
 ax3.text(0.80, 0.08, "High conc.\nSmall", transform=ax3.transAxes, fontsize=10, color="#333333")
 
+# label all points (no repeats now)
 offsets = [(6, 6), (6, -10), (-10, 6), (-10, -10), (10, 0), (-12, 0)]
 for i, r in metrics.reset_index(drop=True).iterrows():
     dx, dy = offsets[i % len(offsets)]
@@ -265,21 +317,21 @@ for i, r in metrics.reset_index(drop=True).iterrows():
         clip_on=True
     )
 
-# Panel 4 mix drivers
+# Panel 4 mix drivers (by KEY, so never duplicates)
 ax4 = fig.add_subplot(gs[2, :])
 
-labels = [wrap_label(x, 26) for x in pivot.index.tolist()]
+labels_wrapped = [wrap_label(n, 26) for n in pivot_names]
 cargo_s = pivot.get("cargo_1000_tons", pd.Series(0, index=pivot.index))
 teu_s = pivot.get("container_1000_teu", pd.Series(0, index=pivot.index))
 pax_s = pivot.get("passengers_count", pd.Series(0, index=pivot.index))
 
-ypos = np.arange(len(labels))
+ypos = np.arange(len(labels_wrapped))
 ax4.barh(ypos, cargo_s, label="Cargo")
 ax4.barh(ypos, teu_s, left=cargo_s, label="Containers")
 ax4.barh(ypos, pax_s, left=cargo_s + teu_s, label="Passengers")
 
 ax4.set_yticks(ypos)
-ax4.set_yticklabels(labels)
+ax4.set_yticklabels(labels_wrapped)
 ax4.invert_yaxis()
 ax4.set_xlabel("Share of mix (%)")
 ax4.set_title(f"Mix drivers (Top {topK} by resilience)", loc="left", fontweight="bold", pad=6)
